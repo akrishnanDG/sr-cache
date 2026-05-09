@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'">
+<title>SR Cache — Admin</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: #1f2937;
+    background: #f8fafc;
+    line-height: 1.4;
+  }
+  .container { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+  header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 1.5rem; }
+  h1 { margin: 0; font-size: 1.5rem; font-weight: 600; }
+  .subtitle { font-size: 0.85rem; color: #64748b; margin-top: 0.25rem; }
+  .uptime { font-size: 0.85rem; color: #64748b; font-variant-numeric: tabular-nums; }
+
+  .grid { display: grid; gap: 1rem; }
+  .stats { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .charts { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); margin-top: 1rem; }
+
+  .card {
+    background: #fff;
+    border-radius: 0.75rem;
+    padding: 1rem 1.1rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  }
+  .label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: #64748b; }
+  .stat { font-size: 1.875rem; font-weight: 600; margin-top: 0.25rem; font-variant-numeric: tabular-nums; }
+  .hint { font-size: 0.75rem; color: #94a3b8; margin-top: 0.25rem; }
+  .stat-row { font-size: 0.85rem; margin-top: 0.4rem; }
+  .chart-title { font-size: 0.85rem; font-weight: 600; color: #334155; margin-bottom: 0.6rem; }
+
+  .pulse-dot {
+    display: inline-block;
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 9999px;
+    margin-right: 0.45rem;
+    vertical-align: 0.05rem;
+  }
+  .ok   { background: #10b981; }
+  .warn { background: #f59e0b; }
+  .bad  { background: #ef4444; }
+
+  svg.chart { width: 100%; height: 140px; display: block; }
+  svg.chart .grid-line { stroke: #f1f5f9; stroke-width: 1; }
+  svg.chart .axis      { stroke: #cbd5e1; stroke-width: 1; }
+
+  footer {
+    text-align: center;
+    margin-top: 2rem;
+    font-size: 0.75rem;
+    color: #94a3b8;
+  }
+  footer a { color: #64748b; text-decoration: underline; margin: 0 0.4rem; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1>Schema Registry Cache</h1>
+      <div class="subtitle">Read-through proxy &middot; live stats refresh every 5&nbsp;s</div>
+    </div>
+    <div class="uptime" id="uptime">uptime —</div>
+  </header>
+
+  <section class="grid stats">
+    <div class="card">
+      <div class="label">Inbound RPS</div>
+      <div class="stat" id="rps">—</div>
+      <div class="hint">requests/sec, 60&nbsp;s avg</div>
+    </div>
+    <div class="card">
+      <div class="label">Upstream RPS</div>
+      <div class="stat" id="upstream-rps">—</div>
+      <div class="hint">should stay below 150</div>
+    </div>
+    <div class="card">
+      <div class="label">Cache hit ratio</div>
+      <div class="stat" id="hit-ratio">—</div>
+      <div class="hint"><span id="hits">0</span> hits &middot; <span id="misses">0</span> misses</div>
+    </div>
+    <div class="card">
+      <div class="label">Status</div>
+      <div class="stat-row"><span id="redis-dot" class="pulse-dot bad"></span>Redis: <span id="redis-state">—</span></div>
+      <div class="stat-row"><span id="breaker-dot" class="pulse-dot ok"></span>Breaker: <span id="breaker-state">—</span></div>
+    </div>
+  </section>
+
+  <section class="grid charts">
+    <div class="card">
+      <div class="chart-title">Cache hit ratio (last 5 min)</div>
+      <svg id="hit-ratio-chart" class="chart" viewBox="0 0 600 140" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="card">
+      <div class="chart-title">Upstream RPS (last 5 min)</div>
+      <svg id="upstream-chart" class="chart" viewBox="0 0 600 140" preserveAspectRatio="none"></svg>
+    </div>
+  </section>
+
+  <footer>
+    <a href="/metrics">/metrics</a>
+    <a href="/admin/stats">/admin/stats</a>
+    <a href="/healthz">/healthz</a>
+    <a href="/readyz">/readyz</a>
+  </footer>
+</div>
+
+<script>
+'use strict';
+
+var POLL_MS = 5000;
+var MAX_POINTS = 60;       // 5 min @ 5 s
+var hitRatioData = [];
+var upstreamData = [];
+
+function fmtPct(x) { return (x * 100).toFixed(1) + '%'; }
+function fmtUptime(s) {
+  var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h + 'h ' + m + 'm ' + sec + 's';
+}
+
+function renderChart(svgId, data, color, opts) {
+  opts = opts || {};
+  var svg = document.getElementById(svgId);
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+  var w = 600, h = 140, pad = 4;
+  var maxY = opts.fixedMaxY != null ? opts.fixedMaxY : Math.max.apply(null, data.concat([0.0001]));
+  if (!isFinite(maxY) || maxY <= 0) maxY = 1;
+
+  // grid lines (4 horizontal)
+  var grid = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  for (var i = 1; i < 4; i++) {
+    var y = pad + (h - 2 * pad) * (i / 4);
+    var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('class', 'grid-line');
+    line.setAttribute('x1', 0); line.setAttribute('x2', w);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    grid.appendChild(line);
+  }
+  svg.appendChild(grid);
+
+  if (data.length < 2) return;
+
+  var step = w / (MAX_POINTS - 1);
+  var pts = [];
+  for (var j = 0; j < data.length; j++) {
+    var x = j * step;
+    var v = data[j];
+    var y2 = pad + (h - 2 * pad) * (1 - (v / maxY));
+    pts.push(x.toFixed(1) + ',' + y2.toFixed(1));
+  }
+
+  // Filled area below the line
+  var areaPath = 'M0,' + (h - pad) + ' L ' + pts.join(' L ') + ' L ' + ((data.length - 1) * step).toFixed(1) + ',' + (h - pad) + ' Z';
+  var area = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  area.setAttribute('d', areaPath);
+  area.setAttribute('fill', color);
+  area.setAttribute('fill-opacity', '0.15');
+  area.setAttribute('stroke', 'none');
+  svg.appendChild(area);
+
+  // Line
+  var linePath = 'M ' + pts.join(' L ');
+  var pl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  pl.setAttribute('d', linePath);
+  pl.setAttribute('fill', 'none');
+  pl.setAttribute('stroke', color);
+  pl.setAttribute('stroke-width', '2');
+  pl.setAttribute('stroke-linejoin', 'round');
+  pl.setAttribute('stroke-linecap', 'round');
+  svg.appendChild(pl);
+}
+
+function pushPoint(arr, v) {
+  arr.push(v);
+  while (arr.length > MAX_POINTS) arr.shift();
+}
+
+function setText(id, v) { document.getElementById(id).textContent = v; }
+function setClass(id, cls) { document.getElementById(id).className = cls; }
+
+function tick() {
+  fetch('/admin/stats', { cache: 'no-store' })
+    .then(function (r) {
+      if (!r.ok) throw new Error('stats ' + r.status);
+      return r.json();
+    })
+    .then(function (s) {
+      setText('rps', s.rps.toFixed(1));
+      setText('upstream-rps', s.upstream_rps.toFixed(2));
+      setText('hit-ratio', fmtPct(s.hit_ratio));
+      setText('hits', s.hits.toLocaleString());
+      setText('misses', s.misses.toLocaleString());
+      setText('uptime', 'uptime ' + fmtUptime(s.uptime_s));
+
+      setText('redis-state', s.redis);
+      setClass('redis-dot', 'pulse-dot ' + (s.redis === 'up' ? 'ok' : 'bad'));
+
+      setText('breaker-state', s.breaker);
+      var bClass = s.breaker === 'closed' ? 'ok' : (s.breaker === 'half_open' ? 'warn' : 'bad');
+      setClass('breaker-dot', 'pulse-dot ' + bClass);
+
+      pushPoint(hitRatioData, s.hit_ratio);
+      pushPoint(upstreamData, s.upstream_rps);
+      renderChart('hit-ratio-chart', hitRatioData, '#0ea5e9', { fixedMaxY: 1 });
+      renderChart('upstream-chart', upstreamData, '#8b5cf6');
+    })
+    .catch(function () {
+      setText('redis-state', 'unreachable');
+      setClass('redis-dot', 'pulse-dot bad');
+    });
+}
+
+tick();
+setInterval(tick, POLL_MS);
+</script>
+</body>
+</html>

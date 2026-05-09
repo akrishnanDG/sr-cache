@@ -1,0 +1,92 @@
+# Example Ingress for the recommended mTLS deployment.
+#
+# This uses ingress-nginx with mTLS annotations. Adapt for Istio Gateway,
+# Envoy Gateway, AWS ALB, etc. — the contract is identical: terminate mTLS
+# at the edge, forward the verified CN to sr-cache via a header.
+#
+# Prereqs:
+#   - cert-manager installed and a ClusterIssuer named "letsencrypt" (or
+#     replace with your CA) for the server cert.
+#   - A Secret containing the customer CA bundle that signs client certs.
+#     Create with:
+#       kubectl create secret generic sr-cache-client-ca \
+#         --from-file=ca.crt=/path/to/your-ca.pem
+#
+# Once applied, point clients at https://sr.example.com with their client cert.
+# nginx-ingress validates the cert against your CA, extracts the CN, and
+# forwards it as `ssl-client-subject-dn`. sr-cache reads it as `X-Client-CN`
+# (we configure nginx to copy the CN-only field).
+---
+# Server-side TLS cert via cert-manager.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sr-cache-server-tls
+spec:
+  secretName: sr-cache-server-tls
+  issuerRef:
+    name: letsencrypt
+    kind: ClusterIssuer
+  dnsNames:
+    - sr.example.com
+  duration: 2160h     # 90 days
+  renewBefore: 720h   # rotate at 60 days
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sr-cache
+  annotations:
+    # Require and verify the client certificate against the customer CA.
+    nginx.ingress.kubernetes.io/auth-tls-verify-client: "on"
+    nginx.ingress.kubernetes.io/auth-tls-secret: "default/sr-cache-client-ca"
+    nginx.ingress.kubernetes.io/auth-tls-verify-depth: "2"
+    nginx.ingress.kubernetes.io/auth-tls-pass-certificate-to-upstream: "false"
+
+    # Forward the verified CN to sr-cache as X-Client-CN.
+    # ssl-client-subject-dn-cn is set by nginx-ingress when verify is on.
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header X-Client-CN  $ssl_client_s_dn_cn;
+      proxy_set_header X-Client-Verify $ssl_client_verify;
+      # Ensure no spoofed values are forwarded from the original client.
+      proxy_set_header X-Forwarded-Client-Cert "";
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [sr.example.com]
+      secretName: sr-cache-server-tls
+  rules:
+    - host: sr.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sr-cache
+                port:
+                  number: 8080
+---
+# Restrict ingress to sr-cache so only the Ingress controller can call it.
+# This is the trust boundary for X-Client-CN: anyone reaching sr-cache could
+# spoof the header, so make sure only the Ingress can.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sr-cache-allow-ingress-only
+spec:
+  podSelector:
+    matchLabels:
+      app: sr-cache
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - port: 8080
+          protocol: TCP

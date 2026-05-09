@@ -1,0 +1,43 @@
+# Secrets — never commit.
+.env
+.env.*
+!.env.example
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+sr-proxy
+/bin/
+
+# Logs / scratch
+*.log
+cp.txt
+
+# OS
+.DS_Store
+
+# Python (clients/python)
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Go test clients
+clients/go/sr-test
+clients/go/sr-cache-test-go
+
+# Java (clients/java) — Maven build outputs
+clients/java/target/
+clients/java/dependency-reduced-pom.xml
+*.class
+
+# IDEs
+.idea/
+.vscode/
+*.iml

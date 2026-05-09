@@ -1,0 +1,10 @@
+{
+  "type": "record",
+  "name": "TestEvent",
+  "namespace": "com.example.srcache.test",
+  "fields": [
+    {"name": "id", "type": "int"},
+    {"name": "msg", "type": "string"},
+    {"name": "client", "type": "string"}
+  ]
+}

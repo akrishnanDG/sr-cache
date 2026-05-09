@@ -1,0 +1,13 @@
+# Honor the deployment's `maxUnavailable: 0` rolling-update promise during
+# voluntary disruptions (node drain, cluster autoscaler eviction, scheduled
+# maintenance). Without a PDB, the eviction API can drain both replicas
+# simultaneously even though the rolling-update strategy says it shouldn't.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sr-cache
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: sr-cache

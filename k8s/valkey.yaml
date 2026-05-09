@@ -1,0 +1,126 @@
+# =============================================================================
+# REFERENCE Valkey deployment — STAGING / SMALL-SCALE PRODUCTION ONLY.
+#
+# This manifest is "good enough" for low-stakes environments. It now includes:
+#   - AUTH password (sourced from the sr-cache-redis Secret)
+#   - non-root, dropped caps, seccomp RuntimeDefault
+#   - AOF persistence on a PVC
+#
+# What you still don't get here (and why managed Valkey is preferred at scale):
+#   - HA / automatic failover (replicas: 1 below — SPOF)
+#   - TLS in transit (in-cluster RESP only)
+#   - Backups / snapshot retention
+#   - Read replicas
+#
+# For larger deployments use ONE of:
+#   - AWS ElastiCache for Valkey   (managed, HA, encryption at rest + in transit)
+#   - GCP Memorystore for Valkey   (same)
+#   - Redis Enterprise Cloud       (commercial, HA, multi-region)
+#   - Self-hosted Valkey Sentinel  (OSS, HA, operationally heavier)
+#
+# Whichever you pick, point sr-cache at it via REDIS_ADDR / REDIS_USERNAME /
+# REDIS_PASSWORD / REDIS_TLS — no code change needed.
+# =============================================================================
+#
+# Provision the password Secret out-of-band before applying this manifest:
+#   kubectl create secret generic sr-cache-redis \
+#     --from-literal=password=$(openssl rand -base64 32)
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: valkey-config
+data:
+  valkey.conf: |
+    appendonly yes
+    appendfsync everysec
+    maxmemory-policy allkeys-lru
+    # requirepass is injected at startup via --requirepass arg (below) so the
+    # ConfigMap doesn't carry the secret.
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: valkey
+spec:
+  serviceName: valkey
+  replicas: 1
+  selector:
+    matchLabels:
+      app: valkey
+  template:
+    metadata:
+      labels:
+        app: valkey
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: valkey
+          image: valkey/valkey:8-alpine
+          # Substitute REDIS_PASSWORD from the mounted Secret into --requirepass.
+          # Using exec ensures Valkey is PID 1 and receives signals correctly.
+          command: ["sh", "-c"]
+          args:
+            - exec valkey-server /etc/valkey/valkey.conf --requirepass "$REDIS_PASSWORD"
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sr-cache-redis
+                  key: password
+          ports:
+            - name: valkey
+              containerPort: 6379
+          volumeMounts:
+            - name: config
+              mountPath: /etc/valkey
+            - name: data
+              mountPath: /data
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: "1",  memory: 1Gi  }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # liveness/readiness probes use AUTH so they verify the password
+          # is correctly mounted as well.
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", 'valkey-cli -a "$REDIS_PASSWORD" ping | grep -q PONG']
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", 'valkey-cli -a "$REDIS_PASSWORD" ping | grep -q PONG']
+            initialDelaySeconds: 15
+            periodSeconds: 15
+      volumes:
+        - name: config
+          configMap:
+            name: valkey-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+spec:
+  selector:
+    app: valkey
+  ports:
+    - name: valkey
+      port: 6379
+      targetPort: valkey
