@@ -24,21 +24,27 @@ import (
 // cache keys + forward upstream. Anything else is dropped so that arbitrary
 // `?cachebust=N` traffic can't blow up the keyspace.
 var allowedQueryParams = map[string]struct{}{
-	"deleted":          {},
-	"deletedOnly":      {},
-	"latestOnly":       {},
-	"normalize":        {},
-	"format":           {},
-	"defaultToGlobal":  {},
-	"subjectPrefix":    {},
-	"subject":          {},
-	"limit":            {},
-	"offset":           {},
-	"showDeleted":      {},
-	"includeDeleted":   {},
-	"fetchMaxId":       {},
-	"verbose":          {},
+	// Read-side
+	"deleted":             {},
+	"deletedOnly":         {},
+	"latestOnly":          {},
+	"normalize":           {},
+	"format":              {},
+	"defaultToGlobal":     {},
+	"subjectPrefix":       {},
+	"subject":             {},
+	"limit":               {},
+	"offset":              {},
+	"showDeleted":         {},
+	"includeDeleted":      {},
+	"fetchMaxId":          {},
+	"verbose":             {},
 	"lookupDeletedSchema": {},
+	// Write-side (must propagate or write semantics break silently)
+	"permanent": {}, // DELETE …?permanent=true → hard-delete; without this it silently soft-deletes
+	"force":     {}, // force-register schemas / config changes
+	"id":        {}, // explicit schema id on POST /subjects/{sub}/versions
+	"version":   {}, // explicit version on POST /subjects/{sub}/versions
 }
 
 type Handler struct {
@@ -196,7 +202,12 @@ func (h *Handler) fetchAndCache(ctx context.Context, c *gin.Context, key string,
 
 	resp, err := h.Up.Do(fetchCtx, http.MethodGet, c.Request.URL.Path, sanitizeQuery(c.Request.URL.Query()), c.Request.Header, nil)
 	if err != nil {
+		// Transport-level errors (TCP reset, DNS failure, timeout) MUST trip
+		// the breaker too — otherwise a HalfOpen probe that fails with a
+		// network error leaves the breaker stuck HalfOpen, returning false
+		// for every subsequent Allow() until process restart.
 		slog.Error("upstream call failed", "err", err, "path", c.Request.URL.Path)
+		h.Breaker.OnFailure()
 		return nil, errUpstream
 	}
 	metrics.RecordUpstream(resp.Status)
@@ -244,6 +255,7 @@ func (h *Handler) passthrough(c *gin.Context) {
 	resp, err := h.Up.Do(c.Request.Context(), c.Request.Method, c.Request.URL.Path, sanitizeQuery(c.Request.URL.Query()), c.Request.Header, body)
 	if err != nil {
 		slog.Error("upstream passthrough failed", "err", err, "method", c.Request.Method, "path", c.Request.URL.Path)
+		h.Breaker.OnFailure()
 		c.JSON(http.StatusBadGateway, gin.H{"error_code": http.StatusBadGateway, "message": "upstream unavailable"})
 		return
 	}
@@ -256,7 +268,9 @@ func (h *Handler) passthrough(c *gin.Context) {
 
 	// Best-effort invalidation on successful writes.
 	if c.Request.Method != http.MethodGet && resp.Status >= 200 && resp.Status < 300 {
-		h.invalidate(c.Request.Context(), c.Request.Method, c.Request.URL.Path)
+		hardDelete := c.Request.Method == http.MethodDelete &&
+			c.Request.URL.Query().Get("permanent") == "true"
+		h.invalidate(c.Request.Context(), c.Request.Method, c.Request.URL.Path, hardDelete)
 	}
 
 	c.Data(resp.Status, fallbackContentType(resp.ContentType), resp.Body)
@@ -264,7 +278,11 @@ func (h *Handler) passthrough(c *gin.Context) {
 
 // invalidate drops cache keys likely to be stale after a write.
 // It's best-effort — any error is logged elsewhere via metrics.
-func (h *Handler) invalidate(ctx context.Context, method, path string) {
+//
+// hardDelete signals that the write was a hard-delete (`?permanent=true`)
+// rather than a soft-delete; in that case we must also drop the
+// schema-by-ID cache (`sr:id:*`) since the schema body itself is gone.
+func (h *Handler) invalidate(ctx context.Context, method, path string, hardDelete bool) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) == 0 {
 		return
@@ -277,8 +295,21 @@ func (h *Handler) invalidate(ctx context.Context, method, path string) {
 			_ = h.Cache.DelByPattern(ctx, "sr:latest:"+sub+":*")
 			_ = h.Cache.DelByPattern(ctx, "sr:subject:"+sub+":versions:*")
 			_ = h.Cache.DelByPattern(ctx, "sr:subjects:*")
+			if hardDelete {
+				// Schema bodies are gone upstream; flush schema-by-ID caches
+				// and per-version caches for this subject. We use a broad
+				// glob for sr:id because IDs aren't deterministic from path.
+				_ = h.Cache.DelByPattern(ctx, "sr:subject:"+sub+":v:*")
+				_ = h.Cache.DelByPattern(ctx, "sr:id:*")
+			}
 		} else {
 			_ = h.Cache.DelByPattern(ctx, "sr:subjects:*")
+		}
+	case "schemas":
+		// /schemas/ids/:id — hard delete on a schema id explicitly
+		if hardDelete && len(parts) >= 3 && parts[1] == "ids" {
+			id := parts[2]
+			_ = h.Cache.Del(ctx, "sr:id:"+id, "sr:id:"+id+":raw")
 		}
 	case "config":
 		// Compatibility changes can move "latest" semantics — drop subject's

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -88,21 +89,29 @@ func getenv(k, def string) string {
 }
 
 func getInt(k string, def int) int {
-	if v := os.Getenv(k); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+	v := os.Getenv(k)
+	if v == "" {
+		return def
 	}
-	return def
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		slog.Warn("invalid integer env var; using default", "var", k, "value", v, "default", def)
+		return def
+	}
+	return n
 }
 
 func getDuration(k string, def time.Duration) time.Duration {
-	if v := os.Getenv(k); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
+	v := os.Getenv(k)
+	if v == "" {
+		return def
 	}
-	return def
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		slog.Warn("invalid duration env var; using default", "var", k, "value", v, "default", def)
+		return def
+	}
+	return d
 }
 
 func getBool(k string, def bool) bool {
@@ -116,6 +125,7 @@ func getBool(k string, def bool) bool {
 	case "0", "f", "false", "n", "no", "off":
 		return false
 	}
+	slog.Warn("invalid boolean env var; using default", "var", k, "value", v, "default", def)
 	return def
 }
 

@@ -29,7 +29,10 @@ func newTestRig(t *testing.T, upstreamHandler http.Handler) (*gin.Engine, *minir
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := cache.New(mr.Addr(), "", 0, 10)
+	c, err := cache.NewWithOptions(cache.Options{Addr: mr.Addr(), PoolSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
 	br := breaker.New(3, 100*time.Millisecond, nil)
 	h := New(up, c, br, 30*time.Second, 10*time.Second)
 
@@ -336,6 +339,110 @@ func TestSingleflightLeaderCancellation(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("entry never landed in cache after leader cancelled; keys=%v hits=%d", mr.Keys(), hits.Load())
+}
+
+// Regression for bug "HalfOpen deadlock on transport errors":
+// when the upstream call returns a network error (not a 429), the breaker
+// must still record a failure. Otherwise a HalfOpen probe that fails with
+// a transport error leaves the breaker stuck HalfOpen forever.
+func TestTransportErrorTripsBreaker(t *testing.T) {
+	// Stub upstream that closes the connection mid-request → io error.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, _ := w.(http.Hijacker)
+		conn, _, _ := hj.Hijack()
+		_ = conn.Close()
+	}))
+	defer ts.Close()
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	up, err := upstream.New(ts.URL, "k", "s", 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := cache.NewWithOptions(cache.Options{Addr: mr.Addr(), PoolSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	br := breaker.New(2, time.Second, nil)
+	h := New(up, c, br, 30*time.Second, 10*time.Second)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	h.Register(r)
+
+	// Two failed transport calls → breaker should transition to Open.
+	for i := 0; i < 2; i++ {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/schemas/ids/1", nil))
+	}
+	if got := br.State(); got != breaker.Open {
+		t.Fatalf("breaker state after 2 transport failures = %s, want Open", got)
+	}
+}
+
+// Regression for bug "permanent query param stripped":
+// DELETE /subjects/foo?permanent=true must propagate the param upstream;
+// otherwise a hard-delete silently becomes a soft-delete.
+func TestPermanentQueryParamPropagated(t *testing.T) {
+	var sawPermanent string
+	upstreamH := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawPermanent = r.URL.Query().Get("permanent")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`[1]`))
+	})
+	r, _, cleanup := newTestRig(t, upstreamH)
+	defer cleanup()
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/subjects/foo?permanent=true", nil))
+	if w.Code != 200 {
+		t.Fatalf("status %d", w.Code)
+	}
+	if sawPermanent != "true" {
+		t.Fatalf("upstream saw permanent=%q, want %q", sawPermanent, "true")
+	}
+}
+
+// Regression for bug "sr:id cache not invalidated on hard-delete":
+// a DELETE with permanent=true must drop schema-by-ID caches.
+func TestHardDeleteInvalidatesSchemaIDCache(t *testing.T) {
+	upstreamH := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/schemas/ids/42":
+			_, _ = w.Write([]byte(`{"schema":"\"string\""}`))
+		case r.Method == http.MethodDelete:
+			_, _ = w.Write([]byte(`[1]`))
+		default:
+			w.WriteHeader(404)
+		}
+	})
+	r, mr, cleanup := newTestRig(t, upstreamH)
+	defer cleanup()
+
+	// 1) Prime the schema-by-ID cache.
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/schemas/ids/42", nil))
+	if !mr.Exists("sr:id:42") {
+		t.Fatalf("expected sr:id:42 to be cached; keys = %v", mr.Keys())
+	}
+
+	// 2) Soft-delete (no permanent): sr:id:* must REMAIN cached.
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/subjects/foo", nil))
+	if !mr.Exists("sr:id:42") {
+		t.Fatalf("soft-delete should leave sr:id:42 in cache (schema still resolvable upstream)")
+	}
+
+	// 3) Hard-delete (permanent=true): sr:id:* must be flushed.
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/subjects/foo?permanent=true", nil))
+	if mr.Exists("sr:id:42") {
+		t.Fatalf("hard-delete failed to flush sr:id:42 from cache")
+	}
 }
 
 func TestErrorsAreNotCached(t *testing.T) {

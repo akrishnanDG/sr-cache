@@ -100,6 +100,13 @@ func (b *Breaker) State() State {
 	return b.state
 }
 
+// transition updates the breaker state and invokes the state-change callback
+// synchronously under the lock.
+//
+// CONTRACT: the onStateChange callback MUST NOT call back into the same
+// Breaker instance (Allow / OnSuccess / OnFailure / State), or it will
+// deadlock. The default callback in main.go only sets a Prometheus gauge
+// and is safe.
 func (b *Breaker) transition(s State) {
 	if b.state == s {
 		return
@@ -109,7 +116,6 @@ func (b *Breaker) transition(s State) {
 		b.failures = 0
 	}
 	if b.onStateChange != nil {
-		// call without holding the lock to avoid recursion
-		go b.onStateChange(s)
+		b.onStateChange(s)
 	}
 }

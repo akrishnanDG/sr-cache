@@ -221,8 +221,24 @@ function tick() {
     });
 }
 
-tick();
-setInterval(tick, POLL_MS);
+// Pause polling when the tab is hidden — Page Visibility API.
+// Saves the proxy from unnecessary lock contention when nobody is watching.
+var pollTimer = null;
+function startPolling() {
+  if (pollTimer != null) return;
+  tick();
+  pollTimer = setInterval(tick, POLL_MS);
+}
+function stopPolling() {
+  if (pollTimer == null) return;
+  clearInterval(pollTimer);
+  pollTimer = null;
+}
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) stopPolling();
+  else startPolling();
+});
+startPolling();
 </script>
 </body>
 </html>

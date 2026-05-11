@@ -37,13 +37,6 @@ type Cache struct {
 	rdb *redis.Client
 }
 
-// New constructs a Cache from a simple set of connection parameters.
-// Use NewWithOptions for username (ACL) + TLS support.
-func New(addr, password string, db, poolSize int) *Cache {
-	c, _ := NewWithOptions(Options{Addr: addr, Password: password, DB: db, PoolSize: poolSize})
-	return c
-}
-
 // NewWithOptions constructs a Cache, honoring TLS + ACL settings.
 func NewWithOptions(o Options) (*Cache, error) {
 	opts := &redis.Options{
