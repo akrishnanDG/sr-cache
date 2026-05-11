@@ -1,0 +1,155 @@
+# Default values for sr-cache. Override with `--set` or a -f values.yaml.
+
+image:
+  repository: ghcr.io/akrishnandg/sr-cache
+  tag: ""              # defaults to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+
+# Replica count for the deployment. HPA (below) will scale between
+# autoscaling.minReplicas and autoscaling.maxReplicas if enabled.
+replicaCount: 2
+
+# ----------------------------------------------------------------------------
+# Upstream Schema Registry connection.
+#
+# Provide these EITHER inline (not recommended for prod — they end up in
+# the rendered manifest), OR via an existing Secret you provision out-of-band
+# with --set upstream.existingSecret=my-secret.
+# ----------------------------------------------------------------------------
+upstream:
+  url: ""             # https://psrc-xxxxxxx.region.cloud.confluent.cloud
+  apiKey: ""
+  apiSecret: ""
+  timeout: 10s
+  # If set, takes precedence over url/apiKey/apiSecret above. The Secret must
+  # contain keys: UPSTREAM_URL, UPSTREAM_API_KEY, UPSTREAM_API_SECRET.
+  existingSecret: ""
+
+# ----------------------------------------------------------------------------
+# Redis / Valkey backend.
+# ----------------------------------------------------------------------------
+redis:
+  addr: "valkey:6379"
+  username: ""        # set for ACL users; leave empty for legacy default user
+  db: 0
+  poolSize: 50
+  tls:
+    enabled: false
+    caFile: ""        # path inside the pod, e.g. /etc/redis-ca/ca.crt
+    skipVerify: false
+  # Secret containing the Redis password under key `password`.
+  # If empty AND redis.password is empty, no AUTH is attempted (only safe for
+  # cluster-internal traffic with NetworkPolicy isolation).
+  existingSecret: "sr-cache-redis"
+  password: ""        # inline password (dev only; prefer existingSecret)
+
+# ----------------------------------------------------------------------------
+# Cache TTLs.
+# ----------------------------------------------------------------------------
+ttl:
+  latest: 30s         # /subjects/{sub}/versions/latest
+  list: 10s           # /subjects, listings, /config, /mode
+
+# ----------------------------------------------------------------------------
+# Circuit breaker.
+# ----------------------------------------------------------------------------
+breaker:
+  openDuration: 10s
+  failThreshold: 3
+
+# ----------------------------------------------------------------------------
+# Optional client identity (X-Client-CN) for use behind a mTLS Ingress.
+# When enabled, the proxy reads the configured header and (optionally)
+# enforces a CN allowlist.
+# ----------------------------------------------------------------------------
+identity:
+  header: "X-Client-CN"
+  required: false
+  allowlist: []       # ["app-foo", "billing-svc"]
+  labelMetricsByCN: false
+  auditLog: true
+
+# ----------------------------------------------------------------------------
+# Server.
+# ----------------------------------------------------------------------------
+server:
+  listenAddr: ":8080"
+  logLevel: "info"
+
+# ----------------------------------------------------------------------------
+# Kubernetes resources.
+# ----------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 500m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# Spread replicas across nodes; preferred so 1-node dev clusters still schedule.
+podAntiAffinity:
+  enabled: true
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+
+# minAvailable for the PodDisruptionBudget. Set to 0 to disable.
+pdbMinAvailable: 1
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# ----------------------------------------------------------------------------
+# Optional Ingress with mTLS (nginx-ingress flavored). When enabled, you also
+# need to provision a Secret containing the client-CA bundle, e.g.:
+#   kubectl create secret generic sr-cache-client-ca \
+#     --from-file=ca.crt=/path/to/your-ca.pem
+# ----------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: nginx
+  host: sr.example.com
+  tls:
+    secretName: sr-cache-server-tls
+  mtls:
+    enabled: true
+    clientCASecret: sr-cache-client-ca
+    verifyDepth: 2
+  annotations: {}
+
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+  readiness:
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+
+# Extra environment variables to set on the sr-cache container.
+extraEnv: []
+# - name: SOMETHING
+#   value: "value"

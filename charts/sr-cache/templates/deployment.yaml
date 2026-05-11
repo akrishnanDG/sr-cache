@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sr-cache.fullname" . }}
+  labels: {{- include "sr-cache.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels: {{- include "sr-cache.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "sr-cache.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.podAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: {{- include "sr-cache.selectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+      {{- end }}
+      containers:
+        - name: sr-cache
+          image: {{ include "sr-cache.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: LISTEN_ADDR
+              value: {{ .Values.server.listenAddr | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.server.logLevel | quote }}
+            - name: LATEST_TTL
+              value: {{ .Values.ttl.latest | quote }}
+            - name: LIST_TTL
+              value: {{ .Values.ttl.list | quote }}
+            - name: REDIS_ADDR
+              value: {{ .Values.redis.addr | quote }}
+            {{- if .Values.redis.username }}
+            - name: REDIS_USERNAME
+              value: {{ .Values.redis.username | quote }}
+            {{- end }}
+            - name: REDIS_DB
+              value: {{ .Values.redis.db | quote }}
+            - name: REDIS_POOL_SIZE
+              value: {{ .Values.redis.poolSize | quote }}
+            {{- if .Values.redis.tls.enabled }}
+            - name: REDIS_TLS
+              value: "true"
+            {{- if .Values.redis.tls.caFile }}
+            - name: REDIS_TLS_CA_FILE
+              value: {{ .Values.redis.tls.caFile | quote }}
+            {{- end }}
+            {{- if .Values.redis.tls.skipVerify }}
+            - name: REDIS_TLS_SKIP_VERIFY
+              value: "true"
+            {{- end }}
+            {{- end }}
+            {{- if .Values.redis.existingSecret }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: password
+                  optional: true
+            {{- else if .Values.redis.password }}
+            - name: REDIS_PASSWORD
+              value: {{ .Values.redis.password | quote }}
+            {{- end }}
+            - name: BREAKER_OPEN_DURATION
+              value: {{ .Values.breaker.openDuration | quote }}
+            - name: BREAKER_FAIL_THRESHOLD
+              value: {{ .Values.breaker.failThreshold | quote }}
+            - name: CLIENT_CN_HEADER
+              value: {{ .Values.identity.header | quote }}
+            - name: CLIENT_CN_REQUIRED
+              value: {{ .Values.identity.required | quote }}
+            {{- if .Values.identity.allowlist }}
+            - name: CLIENT_CN_ALLOWLIST
+              value: {{ join "," .Values.identity.allowlist | quote }}
+            {{- end }}
+            - name: LABEL_METRICS_BY_CN
+              value: {{ .Values.identity.labelMetricsByCN | quote }}
+            - name: AUDIT_LOG
+              value: {{ .Values.identity.auditLog | quote }}
+            - name: UPSTREAM_TIMEOUT
+              value: {{ .Values.upstream.timeout | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ default (printf "%s-upstream" (include "sr-cache.fullname" .)) .Values.upstream.existingSecret }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}

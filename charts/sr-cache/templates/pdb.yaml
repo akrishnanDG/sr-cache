@@ -1,0 +1,11 @@
+{{- if gt (int .Values.pdbMinAvailable) 0 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sr-cache.fullname" . }}
+  labels: {{- include "sr-cache.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdbMinAvailable }}
+  selector:
+    matchLabels: {{- include "sr-cache.selectorLabels" . | nindent 6 }}
+{{- end }}

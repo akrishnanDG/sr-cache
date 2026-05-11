@@ -1,0 +1,27 @@
+sr-cache {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}".
+
+1. Verify pods are healthy:
+   kubectl -n {{ .Release.Namespace }} get pods -l app=sr-cache
+   kubectl -n {{ .Release.Namespace }} get hpa,pdb
+
+2. Point apps at the proxy:
+{{- if .Values.ingress.enabled }}
+   https://{{ .Values.ingress.host }}   (mTLS{{ if not .Values.ingress.mtls.enabled }} disabled{{ end }})
+{{- else }}
+   http://{{ include "sr-cache.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+{{- end }}
+
+3. Observability:
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "sr-cache.fullname" . }} 8080:{{ .Values.service.port }}
+   open http://localhost:8080/admin       (dashboard)
+   open http://localhost:8080/metrics     (Prometheus scrape)
+
+{{- if not .Values.upstream.existingSecret }}
+{{- if not .Values.upstream.url }}
+
+⚠ UPSTREAM_URL is empty. Provide upstream creds via --set or values.yaml,
+  or provision the Secret out-of-band and set upstream.existingSecret.
+{{- end }}
+{{- end }}
+
+For operational procedures see RUNBOOK.md in the project repository.

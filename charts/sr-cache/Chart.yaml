@@ -1,0 +1,20 @@
+apiVersion: v2
+name: sr-cache
+description: Caching proxy for Schema Registry — read-through, singleflight, circuit-breaker, optional mTLS via Ingress.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/akrishnanDG/sr-cache
+sources:
+  - https://github.com/akrishnanDG/sr-cache
+keywords:
+  - schema-registry
+  - kafka
+  - caching-proxy
+  - confluent
+  - valkey
+  - redis
+icon: ""
+maintainers:
+  - name: akrishnanDG
+    url: https://github.com/akrishnanDG

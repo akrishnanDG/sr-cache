@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package identity provides client-identity middleware for the SR cache proxy.
 //
 // The proxy itself does not terminate TLS or verify client certificates — that

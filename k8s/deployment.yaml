@@ -27,9 +27,20 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      # Spread replicas across nodes so a single-node failure doesn't take
+      # them all out. preferredDuringScheduling so 1-node dev clusters still
+      # schedule.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: { app: sr-cache }
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: sr-cache
-          image: ghcr.io/your-org/sr-cache:latest
+          image: ghcr.io/akrishnandg/sr-cache:v0.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

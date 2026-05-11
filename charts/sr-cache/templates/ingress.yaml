@@ -1,0 +1,36 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "sr-cache.fullname" . }}
+  labels: {{- include "sr-cache.labels" . | nindent 4 }}
+  annotations:
+    {{- if .Values.ingress.mtls.enabled }}
+    nginx.ingress.kubernetes.io/auth-tls-verify-client: "on"
+    nginx.ingress.kubernetes.io/auth-tls-secret: "{{ .Release.Namespace }}/{{ .Values.ingress.mtls.clientCASecret }}"
+    nginx.ingress.kubernetes.io/auth-tls-verify-depth: {{ .Values.ingress.mtls.verifyDepth | quote }}
+    nginx.ingress.kubernetes.io/auth-tls-pass-certificate-to-upstream: "false"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header X-Client-CN  $ssl_client_s_dn_cn;
+      proxy_set_header X-Client-Verify $ssl_client_verify;
+      proxy_set_header X-Forwarded-Client-Cert "";
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    - hosts: [{{ .Values.ingress.host | quote }}]
+      secretName: {{ .Values.ingress.tls.secretName }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "sr-cache.fullname" . }}
+                port: { number: {{ .Values.service.port }} }
+{{- end }}
